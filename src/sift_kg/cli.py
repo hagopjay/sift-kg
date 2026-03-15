@@ -573,6 +573,7 @@ def search(
     ),
     output: str | None = typer.Option(None, "-o", help="Output directory"),
     verbose: bool = typer.Option(False, "-v", "--verbose", help="Verbose logging"),
+    as_json: bool = typer.Option(False, "--json", help="Output as JSON (for agent consumption)"),
 ) -> None:
     """Search entities in the knowledge graph by name or alias."""
     _setup_logging(verbose)
@@ -619,6 +620,71 @@ def search(
             aliases = [aliases]
         if any(query_lower in str(a).lower() for a in aliases):
             matches.append((node_id, data))
+
+    def _substantive_degree(node_id: str) -> int:
+        """Count connections excluding DOCUMENT nodes and MENTIONED_IN edges."""
+        count = 0
+        for _, target, edata in kg.graph.edges(node_id, data=True):
+            if edata.get("relation_type") != "MENTIONED_IN" and kg.graph.nodes[target].get("entity_type") != "DOCUMENT":
+                count += 1
+        for source, _, edata in kg.graph.in_edges(node_id, data=True):
+            if source == node_id:
+                continue
+            if edata.get("relation_type") != "MENTIONED_IN" and kg.graph.nodes[source].get("entity_type") != "DOCUMENT":
+                count += 1
+        return count
+
+    if as_json:
+        import json as json_mod
+        from typing import Any
+
+        results = []
+        for node_id, data in matches:
+            entry: dict[str, Any] = {
+                "id": node_id,
+                "name": data.get("name", ""),
+                "entity_type": data.get("entity_type", "UNKNOWN"),
+                "connections": _substantive_degree(node_id),
+                "sources": data.get("source_documents", []),
+            }
+            attrs = data.get("attributes", {})
+            aliases = attrs.get("aliases", []) or attrs.get("also_known_as", [])
+            if isinstance(aliases, str):
+                aliases = [aliases] if aliases else []
+            if aliases:
+                entry["aliases"] = [str(a) for a in aliases]
+
+            if description and node_id in descriptions:
+                entry["description"] = descriptions[node_id]
+
+            if relations:
+                rels = []
+                for _, target, edata in kg.graph.edges(node_id, data=True):
+                    if edata.get("relation_type") == "MENTIONED_IN":
+                        continue
+                    rels.append({
+                        "direction": "outgoing",
+                        "type": edata.get("relation_type", "RELATED_TO"),
+                        "target_id": target,
+                        "target_name": kg.graph.nodes[target].get("name", target),
+                    })
+                for source, _, edata in kg.graph.in_edges(node_id, data=True):
+                    if source == node_id:
+                        continue
+                    if edata.get("relation_type") == "MENTIONED_IN":
+                        continue
+                    rels.append({
+                        "direction": "incoming",
+                        "type": edata.get("relation_type", "RELATED_TO"),
+                        "source_id": source,
+                        "source_name": kg.graph.nodes[source].get("name", source),
+                    })
+                entry["relations"] = rels
+
+            results.append(entry)
+
+        print(json_mod.dumps({"query": query, "results": results}, indent=2))
+        raise typer.Exit(0)
 
     if not matches:
         console.print(f'[yellow]No entities matching "{query}"[/yellow]')

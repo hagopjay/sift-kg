@@ -50,3 +50,63 @@ class TestInfoJson:
         data = json.loads(result.stdout)
         assert "merge_proposals" not in data
         assert "relation_review" not in data
+
+
+class TestSearchJson:
+    """Test sift search --json output."""
+
+    def test_search_json_outputs_valid_json(self, tmp_dir, sample_extraction):
+        """sift search --json produces valid JSON."""
+        from sift_kg.graph.builder import build_graph
+
+        kg = build_graph([sample_extraction], postprocess=False)
+        kg.save(tmp_dir / "graph_data.json")
+
+        result = runner.invoke(app, ["search", "Alice", "--json", "-o", str(tmp_dir)])
+        assert result.exit_code == 0
+        data = json.loads(result.stdout)
+        assert "query" in data
+        assert "results" in data
+        assert len(data["results"]) >= 1
+
+    def test_search_json_includes_relations(self, tmp_dir, sample_extraction):
+        """sift search --json --relations includes relation data."""
+        from sift_kg.graph.builder import build_graph
+
+        kg = build_graph([sample_extraction], postprocess=False)
+        kg.save(tmp_dir / "graph_data.json")
+
+        result = runner.invoke(
+            app, ["search", "Alice", "--json", "--relations", "-o", str(tmp_dir)]
+        )
+        data = json.loads(result.stdout)
+        assert len(data["results"]) >= 1
+        assert "relations" in data["results"][0]
+
+    def test_search_json_no_results(self, tmp_dir, sample_extraction):
+        """sift search --json with no matches returns empty results."""
+        from sift_kg.graph.builder import build_graph
+
+        kg = build_graph([sample_extraction], postprocess=False)
+        kg.save(tmp_dir / "graph_data.json")
+
+        result = runner.invoke(
+            app, ["search", "nonexistent_xyz", "--json", "-o", str(tmp_dir)]
+        )
+        assert result.exit_code == 0
+        data = json.loads(result.stdout)
+        assert data["results"] == []
+
+    def test_search_json_connections_excludes_metadata(self, tmp_dir, sample_extraction):
+        """Connections count excludes MENTIONED_IN edges."""
+        from sift_kg.graph.builder import build_graph
+
+        kg = build_graph([sample_extraction], postprocess=False)
+        kg.save(tmp_dir / "graph_data.json")
+
+        result = runner.invoke(app, ["search", "Alice", "--json", "-o", str(tmp_dir)])
+        data = json.loads(result.stdout)
+        alice = data["results"][0]
+        # Alice has 1 substantive relation (WORKS_FOR -> Acme)
+        # MENTIONED_IN edges to DOCUMENT nodes should be excluded
+        assert alice["connections"] == 1
