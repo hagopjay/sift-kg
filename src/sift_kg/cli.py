@@ -1009,10 +1009,69 @@ SIFT_DEFAULT_MODEL=openai/gpt-4o-mini
 
 
 @app.command()
-def info() -> None:
+def info(
+    output: str | None = typer.Option(None, "-o", help="Output directory"),
+    as_json: bool = typer.Option(False, "--json", help="Output as JSON (for agent consumption)"),
+) -> None:
     """Display project configuration and processing stats."""
     config = SiftConfig()
+    output_dir = Path(output) if output else config.output_dir
     domain_config = _load_domain(config)
+
+    if as_json:
+        import json as json_mod
+        from typing import Any
+
+        from sift_kg.graph.postprocessor import strip_metadata
+
+        data: dict[str, Any] = {
+            "domain": domain_config.name,
+            "entity_types": domain_config.get_entity_type_names(),
+            "relation_type_count": len(domain_config.get_relation_type_names()),
+            "model": config.default_model,
+            "output_dir": str(output_dir),
+            "documents_processed": 0,
+        }
+
+        extractions_dir = output_dir / "extractions"
+        if extractions_dir.exists():
+            data["documents_processed"] = len(list(extractions_dir.glob("*.json")))
+
+        graph_path = output_dir / "graph_data.json"
+        if graph_path.exists():
+            from sift_kg.graph.knowledge_graph import KnowledgeGraph
+
+            kg = KnowledgeGraph.load(graph_path)
+            clean = strip_metadata(kg)
+            data["entities"] = clean.entity_count
+            data["relations"] = clean.relation_count
+
+        proposals_path = output_dir / "merge_proposals.yaml"
+        if proposals_path.exists():
+            from sift_kg.resolve.io import read_proposals
+
+            mf = read_proposals(proposals_path)
+            data["merge_proposals"] = {
+                "confirmed": len(mf.confirmed),
+                "draft": len(mf.draft),
+                "rejected": len(mf.rejected),
+            }
+
+        review_path = output_dir / "relation_review.yaml"
+        if review_path.exists():
+            from sift_kg.resolve.io import read_relation_review
+
+            rf = read_relation_review(review_path)
+            data["relation_review"] = {
+                "confirmed": len(rf.confirmed),
+                "draft": len(rf.draft),
+                "rejected": len(rf.rejected),
+            }
+
+        data["narrative_generated"] = (output_dir / "narrative.md").exists()
+
+        print(json_mod.dumps(data, indent=2))
+        raise typer.Exit(0)
 
     table = Table(title="sift-kg Project Info", show_header=True, header_style="bold cyan")
     table.add_column("Metric", style="dim")
@@ -1022,16 +1081,16 @@ def info() -> None:
     table.add_row("Entity Types", ", ".join(domain_config.get_entity_type_names()))
     table.add_row("Relation Types", str(len(domain_config.get_relation_type_names())))
     table.add_row("Default Model", config.default_model)
-    table.add_row("Output Directory", str(config.output_dir))
+    table.add_row("Output Directory", str(output_dir))
 
-    extractions_dir = config.output_dir / "extractions"
+    extractions_dir = output_dir / "extractions"
     if extractions_dir.exists():
         doc_count = len(list(extractions_dir.glob("*.json")))
         table.add_row("Documents Processed", str(doc_count))
     else:
         table.add_row("Documents Processed", "0")
 
-    graph_path = config.output_dir / "graph_data.json"
+    graph_path = output_dir / "graph_data.json"
     if graph_path.exists():
         from sift_kg.graph.knowledge_graph import KnowledgeGraph
 
@@ -1041,7 +1100,7 @@ def info() -> None:
         table.add_row("Graph", "Not built")
 
     # Check merge/review status
-    proposals_path = config.output_dir / "merge_proposals.yaml"
+    proposals_path = output_dir / "merge_proposals.yaml"
     if proposals_path.exists():
         from sift_kg.resolve.io import read_proposals
 
@@ -1051,7 +1110,7 @@ def info() -> None:
             f"{len(mf.confirmed)} confirmed, {len(mf.draft)} draft, {len(mf.rejected)} rejected",
         )
 
-    review_path = config.output_dir / "relation_review.yaml"
+    review_path = output_dir / "relation_review.yaml"
     if review_path.exists():
         from sift_kg.resolve.io import read_relation_review
 
@@ -1061,7 +1120,7 @@ def info() -> None:
             f"{len(rf.confirmed)} confirmed, {len(rf.draft)} draft, {len(rf.rejected)} rejected",
         )
 
-    narrative_exists = (config.output_dir / "narrative.md").exists()
+    narrative_exists = (output_dir / "narrative.md").exists()
     table.add_row("Narrative Generated", "Yes" if narrative_exists else "No")
 
     console.print(table)
