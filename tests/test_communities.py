@@ -222,3 +222,128 @@ class TestTopologyAnalysis:
         assert "to" in conn
         assert "shared_edges" in conn
         assert conn["shared_edges"] >= 1
+
+
+class TestSubgraphExtraction:
+    """Test subgraph extraction for sift query."""
+
+    def test_extract_subgraph_depth_1(self):
+        """Depth 1 returns direct neighbors only."""
+        from sift_kg.graph.communities import extract_subgraph
+
+        kg = _build_two_cluster_graph()
+        result = extract_subgraph(kg, "person:a1", depth=1)
+        node_ids = {n["id"] for n in result["nodes"]}
+        assert "person:a1" in node_ids
+        assert "person:b1" in node_ids
+        assert "person:b5" not in node_ids
+        assert not any(nid.startswith("doc:") for nid in node_ids)
+
+    def test_extract_subgraph_depth_2(self):
+        """Depth 2 returns more nodes than depth 1."""
+        from sift_kg.graph.communities import extract_subgraph
+
+        kg = _build_two_cluster_graph()
+        result_1 = extract_subgraph(kg, "person:a1", depth=1)
+        result_2 = extract_subgraph(kg, "person:a1", depth=2)
+        assert len(result_2["nodes"]) > len(result_1["nodes"])
+        node_ids_2 = {n["id"] for n in result_2["nodes"]}
+        assert "person:b5" in node_ids_2
+
+    def test_extract_subgraph_excludes_mentioned_in(self):
+        """MENTIONED_IN edges excluded from subgraph links."""
+        from sift_kg.graph.communities import extract_subgraph
+
+        kg = _build_two_cluster_graph()
+        result = extract_subgraph(kg, "person:a1", depth=1)
+        link_types = {link["relation_type"] for link in result["links"]}
+        assert "MENTIONED_IN" not in link_types
+
+    def test_extract_subgraph_nonexistent_entity(self):
+        """Nonexistent entity returns empty subgraph."""
+        from sift_kg.graph.communities import extract_subgraph
+
+        kg = _build_two_cluster_graph()
+        result = extract_subgraph(kg, "person:nobody", depth=1)
+        assert result["nodes"] == []
+        assert result["links"] == []
+
+    def test_extract_subgraph_has_edge_data(self):
+        """Links include relation_type and confidence."""
+        from sift_kg.graph.communities import extract_subgraph
+
+        kg = _build_two_cluster_graph()
+        result = extract_subgraph(kg, "person:a1", depth=1)
+        assert len(result["links"]) > 0
+        link = result["links"][0]
+        assert "source" in link
+        assert "target" in link
+        assert "relation_type" in link
+
+
+class TestEntityTopology:
+    """Test single-entity topology lookup."""
+
+    def test_bridge_entity(self, tmp_dir):
+        """Bridge entity has is_bridge=True and bridge_communities populated."""
+        from sift_kg.graph.communities import (
+            detect_communities,
+            get_entity_topology,
+            save_communities,
+        )
+
+        kg = _build_two_cluster_graph()
+        communities = detect_communities(kg, min_community_size=3)
+        assert communities is not None
+        save_communities(communities, tmp_dir)
+
+        topo = get_entity_topology(kg, "person:a1", tmp_dir)
+        assert topo["community"] is not None
+        assert topo["is_bridge"] is True
+        assert len(topo["bridge_communities"]) >= 1
+
+    def test_non_bridge_entity(self, tmp_dir):
+        """Interior entity is not a bridge."""
+        from sift_kg.graph.communities import (
+            detect_communities,
+            get_entity_topology,
+            save_communities,
+        )
+
+        kg = _build_two_cluster_graph()
+        communities = detect_communities(kg, min_community_size=3)
+        assert communities is not None
+        save_communities(communities, tmp_dir)
+
+        topo = get_entity_topology(kg, "person:a5", tmp_dir)
+        assert topo["community"] is not None
+        assert topo["is_bridge"] is False
+        assert topo["bridge_communities"] == []
+
+    def test_entity_not_in_communities(self, tmp_dir):
+        """Entity in graph but not in communities.json gets null community."""
+        from sift_kg.graph.communities import get_entity_topology, save_communities
+
+        kg = KnowledgeGraph()
+        kg.add_entity("person:loner", "PERSON", "Loner")
+        save_communities([], tmp_dir)
+
+        topo = get_entity_topology(kg, "person:loner", tmp_dir)
+        assert topo["community"] is None
+        assert topo["is_bridge"] is False
+
+    def test_missing_communities_file(self):
+        """Missing communities.json returns null/empty topology."""
+        import tempfile
+        from pathlib import Path
+
+        from sift_kg.graph.communities import get_entity_topology
+
+        kg = KnowledgeGraph()
+        kg.add_entity("person:a", "PERSON", "A")
+
+        with tempfile.TemporaryDirectory() as d:
+            topo = get_entity_topology(kg, "person:a", Path(d))
+        assert topo["community"] is None
+        assert topo["is_bridge"] is False
+        assert topo["bridge_communities"] == []

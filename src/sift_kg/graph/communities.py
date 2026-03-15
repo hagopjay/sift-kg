@@ -287,3 +287,134 @@ def find_community_connections(
 
     connections.sort(key=lambda c: c["shared_edges"], reverse=True)
     return connections
+
+
+def extract_subgraph(
+    kg: KnowledgeGraph,
+    entity_id: str,
+    depth: int = 1,
+) -> dict[str, Any]:
+    """Extract neighborhood subgraph around an entity.
+
+    Uses BFS on the clean undirected graph (DOCUMENT nodes and MENTIONED_IN
+    stripped), then extracts matching nodes and directed edges from the
+    original graph.
+
+    Args:
+        kg: Knowledge graph.
+        entity_id: Center entity ID.
+        depth: Number of hops.
+
+    Returns:
+        Dict with 'nodes' and 'links' lists matching graph_data.json format.
+        Empty lists if entity not found.
+    """
+    undirected = _build_clean_undirected(kg)
+    if entity_id not in undirected:
+        return {"nodes": [], "links": []}
+
+    # BFS to collect node set
+    visited: set[str] = {entity_id}
+    frontier: set[str] = {entity_id}
+    for _ in range(depth):
+        next_frontier: set[str] = set()
+        for node in frontier:
+            for neighbor in undirected.neighbors(node):
+                if neighbor not in visited:
+                    visited.add(neighbor)
+                    next_frontier.add(neighbor)
+        frontier = next_frontier
+        if not frontier:
+            break
+
+    # Extract nodes from original graph
+    nodes: list[dict[str, Any]] = []
+    for nid in visited:
+        data = kg.graph.nodes.get(nid, {})
+        if data.get("entity_type") == "DOCUMENT":
+            continue
+        node_dict: dict[str, Any] = {
+            "id": nid,
+            "entity_type": data.get("entity_type", "UNKNOWN"),
+            "name": data.get("name", nid),
+            "confidence": data.get("confidence", 1.0),
+            "source_documents": data.get("source_documents", []),
+        }
+        attrs = data.get("attributes")
+        if attrs:
+            node_dict["attributes"] = attrs
+        nodes.append(node_dict)
+
+    # Extract directed edges between visited nodes
+    links: list[dict[str, Any]] = []
+    for source, target, _key, edata in kg.graph.edges(keys=True, data=True):
+        if source not in visited or target not in visited:
+            continue
+        if edata.get("relation_type") == "MENTIONED_IN":
+            continue
+        if kg.graph.nodes.get(source, {}).get("entity_type") == "DOCUMENT":
+            continue
+        if kg.graph.nodes.get(target, {}).get("entity_type") == "DOCUMENT":
+            continue
+        link_dict: dict[str, Any] = {
+            "source": source,
+            "target": target,
+            "relation_type": edata.get("relation_type", "RELATED_TO"),
+            "confidence": edata.get("confidence", 1.0),
+        }
+        evidence = edata.get("evidence")
+        if evidence:
+            link_dict["evidence"] = evidence
+        support_count = edata.get("support_count")
+        if support_count:
+            link_dict["support_count"] = support_count
+        support_docs = edata.get("support_documents")
+        if support_docs:
+            link_dict["support_documents"] = support_docs
+        links.append(link_dict)
+
+    return {"nodes": nodes, "links": links}
+
+
+def get_entity_topology(
+    kg: KnowledgeGraph,
+    entity_id: str,
+    output_dir: Path,
+) -> dict[str, Any]:
+    """Get topology context for a single entity.
+
+    Looks up community membership and computes bridge status inline
+    (without calling find_bridges, which recomputes all bridges).
+
+    Args:
+        kg: Knowledge graph.
+        entity_id: Entity to look up.
+        output_dir: Directory containing communities.json.
+
+    Returns:
+        Dict with community, is_bridge, bridge_communities.
+    """
+    community_map = load_communities(output_dir)
+
+    entity_community = community_map.get(entity_id)
+    if not entity_community:
+        return {
+            "community": None,
+            "is_bridge": False,
+            "bridge_communities": [],
+        }
+
+    # Inline bridge check for this single entity
+    undirected = _build_clean_undirected(kg)
+    other_communities: set[str] = set()
+    if entity_id in undirected:
+        for neighbor in undirected.neighbors(entity_id):
+            neighbor_comm = community_map.get(neighbor)
+            if neighbor_comm and neighbor_comm != entity_community:
+                other_communities.add(neighbor_comm)
+
+    return {
+        "community": entity_community,
+        "is_bridge": len(other_communities) > 0,
+        "bridge_communities": sorted(other_communities),
+    }
