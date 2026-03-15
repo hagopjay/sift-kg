@@ -159,3 +159,131 @@ def load_communities_grouped(output_dir: Path) -> dict[str, list[str]]:
     for eid, label in flat.items():
         grouped.setdefault(label, []).append(eid)
     return grouped
+
+
+def find_bridges(
+    kg: KnowledgeGraph,
+    output_dir: Path,
+) -> list[dict[str, Any]]:
+    """Find bridge entities that connect 2+ communities.
+
+    Uses undirected projection with DOCUMENT/MENTIONED_IN stripped.
+
+    Args:
+        kg: Knowledge graph.
+        output_dir: Directory containing communities.json.
+
+    Returns:
+        List of bridge dicts with entity, name, entity_type,
+        communities, and cross_community_edges.
+    """
+    community_map = load_communities(output_dir)
+    if not community_map:
+        return []
+
+    undirected = _build_clean_undirected(kg)
+    bridges: list[dict[str, Any]] = []
+
+    for node_id in undirected.nodes():
+        if node_id not in community_map:
+            continue
+        node_community = community_map[node_id]
+
+        neighbor_communities: set[str] = set()
+        cross_edges = 0
+        for neighbor in undirected.neighbors(node_id):
+            neighbor_comm = community_map.get(neighbor)
+            if neighbor_comm and neighbor_comm != node_community:
+                neighbor_communities.add(neighbor_comm)
+                cross_edges += 1
+
+        if neighbor_communities:
+            all_communities = sorted({node_community} | neighbor_communities)
+            node_data = kg.graph.nodes.get(node_id, {})
+            bridges.append({
+                "entity": node_id,
+                "name": node_data.get("name", node_id),
+                "entity_type": node_data.get("entity_type", "UNKNOWN"),
+                "communities": all_communities,
+                "cross_community_edges": cross_edges,
+            })
+
+    bridges.sort(key=lambda b: b["cross_community_edges"], reverse=True)
+    return bridges
+
+
+def find_isolated(kg: KnowledgeGraph) -> list[dict[str, Any]]:
+    """Find entities with no substantive connections.
+
+    An entity is isolated if it has degree 0 on the cleaned graph
+    (DOCUMENT nodes and MENTIONED_IN edges stripped).
+
+    Args:
+        kg: Knowledge graph.
+
+    Returns:
+        List of isolated entity dicts with entity, name, entity_type, degree.
+    """
+    undirected = _build_clean_undirected(kg)
+    isolated: list[dict[str, Any]] = []
+
+    for node_id in undirected.nodes():
+        if undirected.degree(node_id) == 0:
+            node_data = kg.graph.nodes.get(node_id, {})
+            isolated.append({
+                "entity": node_id,
+                "name": node_data.get("name", node_id),
+                "entity_type": node_data.get("entity_type", "UNKNOWN"),
+                "degree": 0,
+            })
+
+    return isolated
+
+
+def find_community_connections(
+    kg: KnowledgeGraph,
+    output_dir: Path,
+) -> list[dict[str, Any]]:
+    """Find connections between communities.
+
+    For each pair of communities, counts shared edges and bridge entities.
+
+    Args:
+        kg: Knowledge graph.
+        output_dir: Directory containing communities.json.
+
+    Returns:
+        List of connection dicts with from, to, shared_edges, bridge_entities.
+        Sorted by shared_edges descending.
+    """
+    community_map = load_communities(output_dir)
+    if not community_map:
+        return []
+
+    undirected = _build_clean_undirected(kg)
+
+    # Count cross-community edges and bridge entities per pair
+    pair_edges: dict[tuple[str, str], int] = {}
+    pair_bridges: dict[tuple[str, str], set[str]] = {}
+
+    for u, v in undirected.edges():
+        u_comm = community_map.get(u)
+        v_comm = community_map.get(v)
+        if not u_comm or not v_comm or u_comm == v_comm:
+            continue
+        pair = tuple(sorted([u_comm, v_comm]))
+        pair_edges[pair] = pair_edges.get(pair, 0) + 1
+        pair_bridges.setdefault(pair, set()).update([u, v])
+
+    connections: list[dict[str, Any]] = []
+    for (comm_a, comm_b), edge_count in pair_edges.items():
+        bridge_nodes = pair_bridges.get((comm_a, comm_b), set())
+        connections.append({
+            "from": comm_a,
+            "to": comm_b,
+            "shared_edges": edge_count,
+            "bridge_entities": len(bridge_nodes),
+        })
+
+    connections.sort(key=lambda c: c["shared_edges"], reverse=True)
+    return connections

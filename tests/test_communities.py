@@ -151,3 +151,74 @@ class TestSaveLoadCommunities:
         grouped = load_communities_grouped(tmp_dir)
         assert set(grouped["Alpha"]) == {"person:a1", "person:a2"}
         assert grouped["Beta"] == ["person:b1"]
+
+
+class TestTopologyAnalysis:
+    """Test bridge, isolation, and community connection analysis."""
+
+    def test_find_bridges(self, tmp_dir):
+        """Bridge entities connect 2+ communities."""
+        from sift_kg.graph.communities import detect_communities, find_bridges, save_communities
+
+        kg = _build_two_cluster_graph()
+        communities = detect_communities(kg, min_community_size=3)
+        assert communities is not None
+
+        save_communities(communities, tmp_dir)
+        bridges = find_bridges(kg, tmp_dir)
+
+        # a1 connects both clusters
+        bridge_ids = {b["entity"] for b in bridges}
+        assert "person:a1" in bridge_ids or "person:b1" in bridge_ids
+
+    def test_find_isolated(self):
+        """Isolated entities have no substantive connections."""
+        from sift_kg.graph.communities import find_isolated
+
+        kg = KnowledgeGraph()
+        kg.add_entity("person:loner", "PERSON", "Loner")
+        kg.add_entity("person:connected", "PERSON", "Connected")
+        kg.add_entity("person:other", "PERSON", "Other")
+        kg.add_relation("r1", "person:connected", "person:other", "KNOWS")
+        # loner has no edges at all
+
+        isolated = find_isolated(kg)
+        isolated_ids = {i["entity"] for i in isolated}
+        assert "person:loner" in isolated_ids
+        assert "person:connected" not in isolated_ids
+
+    def test_find_isolated_metadata_only(self):
+        """Entity with only MENTIONED_IN edges is isolated."""
+        from sift_kg.graph.communities import find_isolated
+
+        kg = KnowledgeGraph()
+        kg.add_entity("person:meta_only", "PERSON", "MetaOnly")
+        kg.add_entity("doc:test", "DOCUMENT", "test")
+        kg.add_relation("r1", "person:meta_only", "doc:test", "MENTIONED_IN", canonicalize=False)
+
+        isolated = find_isolated(kg)
+        isolated_ids = {i["entity"] for i in isolated}
+        assert "person:meta_only" in isolated_ids
+
+    def test_community_connections(self, tmp_dir):
+        """Cross-community edges are detected."""
+        from sift_kg.graph.communities import (
+            detect_communities,
+            find_community_connections,
+            save_communities,
+        )
+
+        kg = _build_two_cluster_graph()
+        communities = detect_communities(kg, min_community_size=3)
+        assert communities is not None
+
+        save_communities(communities, tmp_dir)
+        connections = find_community_connections(kg, tmp_dir)
+
+        # There should be at least one cross-community connection
+        assert len(connections) >= 1
+        conn = connections[0]
+        assert "from" in conn
+        assert "to" in conn
+        assert "shared_edges" in conn
+        assert conn["shared_edges"] >= 1
