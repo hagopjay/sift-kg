@@ -73,23 +73,9 @@ def regenerate_communities(
     Deletes any existing communities.json and creates a fresh one.
     Much cheaper than full narrate (~$0.01).
     """
-    # Gather non-document entities
-    entities = []
-    for nid, data in kg.graph.nodes(data=True):
-        if data.get("entity_type") == "DOCUMENT":
-            continue
-        entities.append({
-            "id": nid,
-            "name": data.get("name", nid),
-            "entity_type": data.get("entity_type", "UNKNOWN"),
-        })
+    from sift_kg.graph.communities import detect_communities, save_communities
 
-    degree_map = dict(kg.graph.degree())
-    entities.sort(key=lambda e: degree_map.get(e["id"], 0), reverse=True)
-
-    # Use all entities as "described" for community detection
-    described_ids = {e["id"] for e in entities}
-    communities = _detect_communities(kg, entities, dict.fromkeys(described_ids, ""), degree_map)
+    communities = detect_communities(kg)
 
     comm_path = output_dir / "communities.json"
     if not communities:
@@ -98,17 +84,8 @@ def regenerate_communities(
         return comm_path
 
     community_labels = _generate_theme_labels(communities, kg, llm)
-
-    comm_data: dict[str, str] = {}
-    for i, community in enumerate(communities):
-        label = community_labels.get(i, f"Community {i + 1}")
-        for e in community:
-            comm_data[e["id"]] = label
-
-    comm_path.write_text(
-        json.dumps(comm_data, indent=2, ensure_ascii=False), encoding="utf-8",
-    )
-    logger.info(f"Communities regenerated ({len(set(comm_data.values()))} communities)")
+    save_communities(communities, output_dir, labels=community_labels)
+    logger.info(f"Communities regenerated ({len(communities)} communities)")
     return comm_path
 
 
@@ -266,19 +243,14 @@ def generate_narrative(
             communities = list(comm_groups.values())
             community_labels = dict(enumerate(comm_groups.keys()))
     elif entity_descriptions:
-        communities = _detect_communities(kg, entities, entity_descriptions, degree_map)
+        from sift_kg.graph.communities import detect_communities, save_communities
+
+        described_ids = set(entity_descriptions.keys())
+        communities = detect_communities(kg, described_ids=described_ids)
         if communities:
             community_labels = _generate_theme_labels(communities, kg, llm)
-            # Save for future runs + visualizer
-            comm_data = {}
-            for i, community in enumerate(communities):
-                label = community_labels.get(i, f"Community {i + 1}")
-                for e in community:
-                    comm_data[e["id"]] = label
-            comm_path.write_text(
-                json.dumps(comm_data, indent=2, ensure_ascii=False), encoding="utf-8",
-            )
-            logger.info(f"Community assignments saved ({len(set(comm_data.values()))} communities)")
+            save_communities(communities, output_dir, labels=community_labels)
+            logger.info(f"Community assignments saved ({len(communities)} communities)")
 
     # Save descriptions as JSON sidecar for viewer integration
     if entity_descriptions:
@@ -414,66 +386,6 @@ def _get_edge_type(kg: KnowledgeGraph, src: str, tgt: str) -> str:
 # ---------------------------------------------------------------------------
 # Phase 3 helpers: Community detection + theme naming
 # ---------------------------------------------------------------------------
-
-
-def _detect_communities(
-    kg: KnowledgeGraph,
-    entities: list[dict[str, Any]],
-    entity_descriptions: dict[str, str],
-    degree_map: dict[str, int],
-) -> list[list[dict[str, Any]]] | None:
-    """Detect thematic communities using Louvain method.
-
-    Returns list of communities (each a list of entity dicts) sorted by
-    total degree. Only includes communities with 3+ described entities.
-    Returns None if detection fails or produces <=1 community.
-    """
-    try:
-        # Build subgraph excluding DOCUMENT nodes and MENTIONED_IN edges
-        # to prevent co-mention from distorting community structure
-        non_doc_nodes = [
-            nid for nid, data in kg.graph.nodes(data=True)
-            if data.get("entity_type") != "DOCUMENT"
-        ]
-        subgraph = kg.graph.subgraph(non_doc_nodes).copy()
-        # Remove any remaining MENTIONED_IN edges
-        edges_to_remove = [
-            (u, v, k) for u, v, k, d in subgraph.edges(keys=True, data=True)
-            if d.get("relation_type") == "MENTIONED_IN"
-        ]
-        subgraph.remove_edges_from(edges_to_remove)
-        undirected = subgraph.to_undirected()
-        raw_communities = nx.community.louvain_communities(undirected)
-    except Exception as e:
-        logger.debug(f"Community detection failed: {e}")
-        return None
-
-    if len(raw_communities) <= 1:
-        return None
-
-    described_ids = set(entity_descriptions.keys())
-    entity_map = {e["id"]: e for e in entities}
-
-    result: list[list[dict[str, Any]]] = []
-    for community_nodes in raw_communities:
-        members = [
-            entity_map[nid]
-            for nid in community_nodes
-            if nid in entity_map and nid in described_ids
-        ]
-        if len(members) >= 8:
-            result.append(members)
-
-    if not result:
-        return None
-
-    # Sort communities by total degree of members (most connected first)
-    result.sort(
-        key=lambda c: sum(degree_map.get(e["id"], 0) for e in c),
-        reverse=True,
-    )
-
-    return result
 
 
 def _generate_theme_labels(
